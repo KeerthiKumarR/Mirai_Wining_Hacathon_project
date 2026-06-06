@@ -20,13 +20,13 @@ class PreferencesManager(context: Context) {
         }
 
     var caregiverName: String
-        get() = prefs.getString(KEY_CAREGIVER_NAME, "") ?: ""
+        get() = prefs.getString(KEY_CAREGIVER_NAME, "Caregiver") ?: "Caregiver"
         set(value) {
             prefs.edit().putString(KEY_CAREGIVER_NAME, value).apply()
         }
 
     var caregiverPhone: String
-        get() = prefs.getString(KEY_CAREGIVER_PHONE, "") ?: ""
+        get() = prefs.getString(KEY_CAREGIVER_PHONE, "9876543210") ?: "9876543210"
         set(value) {
             prefs.edit().putString(KEY_CAREGIVER_PHONE, value).apply()
         }

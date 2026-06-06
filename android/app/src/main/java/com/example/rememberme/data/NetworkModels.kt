@@ -44,5 +44,6 @@ data class SosRequest(
     val caregiver_phone: String,
     val latitude: Double,
     val longitude: Double,
-    val location_link: String
+    val location_link: String,
+    val timestamp: String
 )

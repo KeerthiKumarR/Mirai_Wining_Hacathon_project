@@ -106,13 +106,29 @@ fun MainScreen(
         return fine || coarse
     }
 
+    fun isLocationServicesEnabled(c: Context): Boolean {
+        val locationManager = c.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+        val gpsEnabled = locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+        val networkEnabled = locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+        return gpsEnabled || networkEnabled
+    }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
         val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
         if (fineGranted || coarseGranted) {
-            isSosActive = true
+            if (isLocationServicesEnabled(context)) {
+                isSosActive = true
+            } else {
+                android.widget.Toast.makeText(context, "Please enable GPS/Location Services.", android.widget.Toast.LENGTH_LONG).show()
+                try {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
         } else {
             android.widget.Toast.makeText(context, "Location permissions are required for SOS.", android.widget.Toast.LENGTH_LONG).show()
         }
@@ -243,7 +259,16 @@ fun MainScreen(
                         android.widget.Toast.makeText(context, "SOS Alert Cancelled", android.widget.Toast.LENGTH_SHORT).show()
                     } else {
                         if (hasLocationPermissions(context)) {
-                            isSosActive = true
+                            if (isLocationServicesEnabled(context)) {
+                                isSosActive = true
+                            } else {
+                                android.widget.Toast.makeText(context, "Please enable GPS/Location Services.", android.widget.Toast.LENGTH_LONG).show()
+                                try {
+                                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                } catch (e: Exception) {
+                                    // Ignore
+                                }
+                            }
                         } else {
                             locationPermissionLauncher.launch(
                                 arrayOf(
@@ -1014,52 +1039,128 @@ private fun sendSosLocationUpdate(
     onStatusChange: (String) -> Unit
 ) {
     onStatusChange("Fetching current location...")
+    
+    // 1. Check if location services are enabled
+    val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+    val isGpsEnabled = locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+    val isNetworkEnabled = locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+    
+    if (!isGpsEnabled && !isNetworkEnabled) {
+        val isEmulator = (android.os.Build.BRAND.startsWith("generic") && android.os.Build.DEVICE.startsWith("generic"))
+                || android.os.Build.FINGERPRINT.startsWith("generic")
+                || android.os.Build.FINGERPRINT.startsWith("unknown")
+                || android.os.Build.HARDWARE.contains("goldfish")
+                || android.os.Build.HARDWARE.contains("ranchu")
+                || android.os.Build.MODEL.contains("google_sdk")
+                || android.os.Build.MODEL.contains("Emulator")
+                || android.os.Build.MODEL.contains("Android SDK built for x86")
+                || android.os.Build.MANUFACTURER.contains("Genymotion")
+                || android.os.Build.PRODUCT.contains("sdk_google")
+                || android.os.Build.PRODUCT.contains("google_sdk")
+                || android.os.Build.PRODUCT.contains("sdk")
+                || android.os.Build.PRODUCT.contains("sdk_x86")
+                || android.os.Build.PRODUCT.contains("vbox86p")
+                || android.os.Build.PRODUCT.contains("emulator")
+                || android.os.Build.PRODUCT.contains("simulator")
+
+        val errorMsg = if (isEmulator) {
+            "Location is disabled. Please enable it in the emulator settings."
+        } else {
+            "Location is disabled. Please enable GPS/Location Services."
+        }
+        android.widget.Toast.makeText(context, errorMsg, android.widget.Toast.LENGTH_LONG).show()
+        onStatusChange("SOS failed: GPS disabled")
+        return
+    }
+
+    // 2. Define a helper to perform the SOS API call
+    fun sendSosWithLocation(loc: android.location.Location) {
+        val lat = loc.latitude
+        val lon = loc.longitude
+        val mapsLink = "https://maps.google.com/?q=$lat,$lon"
+        
+        val nameToSend = if (activeName.isNotEmpty()) activeName else if (prefManager.caregiverName.isNotEmpty()) prefManager.caregiverName else "User"
+        val phoneToSend = if (activePhone.isNotEmpty()) activePhone else if (prefManager.caregiverPhone.isNotEmpty()) prefManager.caregiverPhone else "9876543210"
+        
+        val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
+
+        coroutineScope.launch {
+            try {
+                val api = NetworkClient.createService(prefManager.apiUrl)
+                api.sendSos(
+                    SosRequest(
+                        person_name = nameToSend,
+                        caregiver_phone = phoneToSend,
+                        latitude = lat,
+                        longitude = lon,
+                        location_link = mapsLink,
+                        timestamp = timestamp
+                    )
+                )
+                Log.d("SOS_API", "SOS successfully sent to $phoneToSend")
+                android.widget.Toast.makeText(context, "Emergency alert sent to caregiver!", android.widget.Toast.LENGTH_SHORT).show()
+                onStatusChange("Emergency SOS Alert Sent")
+            } catch (e: Exception) {
+                Log.e("SOS_API", "Failed to send SOS", e)
+                android.widget.Toast.makeText(context, "SOS API error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                onStatusChange("SOS send failed")
+            }
+        }
+    }
+
+    // 3. Define a fallback to check lastLocation
+    fun tryLastLocation(fallbackReason: String) {
+        Log.d("SOS_GPS", "Attempting fallback to lastLocation. Reason: $fallbackReason")
+        locationClient.lastLocation.addOnSuccessListener { lastLoc ->
+            if (lastLoc != null) {
+                sendSosWithLocation(lastLoc)
+            } else {
+                val isEmulator = (android.os.Build.BRAND.startsWith("generic") && android.os.Build.DEVICE.startsWith("generic"))
+                        || android.os.Build.FINGERPRINT.startsWith("generic")
+                        || android.os.Build.FINGERPRINT.startsWith("unknown")
+                        || android.os.Build.HARDWARE.contains("goldfish")
+                        || android.os.Build.HARDWARE.contains("ranchu")
+                        || android.os.Build.MODEL.contains("google_sdk")
+                        || android.os.Build.MODEL.contains("Emulator")
+                        || android.os.Build.MODEL.contains("Android SDK built for x86")
+                        || android.os.Build.MANUFACTURER.contains("Genymotion")
+                        || android.os.Build.PRODUCT.contains("sdk_google")
+                        || android.os.Build.PRODUCT.contains("google_sdk")
+                        || android.os.Build.PRODUCT.contains("sdk")
+                        || android.os.Build.PRODUCT.contains("sdk_x86")
+                        || android.os.Build.PRODUCT.contains("vbox86p")
+                        || android.os.Build.PRODUCT.contains("emulator")
+                        || android.os.Build.PRODUCT.contains("simulator")
+
+                val msg = if (isEmulator) {
+                    "Unable to acquire location. On emulator, open 'Extended Controls' (three dots) -> 'Location' and click 'Set Location'."
+                } else {
+                    "GPS cannot establish a fix. Please go outdoors or ensure GPS is enabled."
+                }
+                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
+                onStatusChange("SOS failed: GPS unavailable")
+            }
+        }.addOnFailureListener { e ->
+            Log.e("SOS_API", "Last location also failed", e)
+            android.widget.Toast.makeText(context, "GPS failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            onStatusChange("SOS failed: GPS error")
+        }
+    }
+
+    // 4. Try current location first
     locationClient.getCurrentLocation(
         com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
         null
     ).addOnSuccessListener { location ->
         if (location != null) {
-            val lat = location.latitude
-            val lon = location.longitude
-            val mapsLink = "https://maps.google.com/?q=$lat,$lon"
-            
-            val nameToSend = if (activeName.isNotEmpty()) activeName else if (prefManager.caregiverName.isNotEmpty()) prefManager.caregiverName else "User"
-            val phoneToSend = if (activePhone.isNotEmpty()) activePhone else if (prefManager.caregiverPhone.isNotEmpty()) prefManager.caregiverPhone else ""
-            
-            if (phoneToSend.isEmpty()) {
-                android.widget.Toast.makeText(context, "SOS error: No caregiver phone number configured.", android.widget.Toast.LENGTH_LONG).show()
-                onStatusChange("SOS failed: Config caregiver phone in settings")
-                return@addOnSuccessListener
-            }
-
-            coroutineScope.launch {
-                try {
-                    val api = NetworkClient.createService(prefManager.apiUrl)
-                    api.sendSos(
-                        SosRequest(
-                            person_name = nameToSend,
-                            caregiver_phone = phoneToSend,
-                            latitude = lat,
-                            longitude = lon,
-                            location_link = mapsLink
-                        )
-                    )
-                    Log.d("SOS_API", "SOS successfully sent to $phoneToSend")
-                    android.widget.Toast.makeText(context, "Emergency alert sent to caregiver!", android.widget.Toast.LENGTH_SHORT).show()
-                    onStatusChange("Emergency SOS Alert Sent")
-                } catch (e: Exception) {
-                    Log.e("SOS_API", "Failed to send SOS", e)
-                    android.widget.Toast.makeText(context, "SOS API error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                    onStatusChange("SOS send failed")
-                }
-            }
+            sendSosWithLocation(location)
         } else {
-            android.widget.Toast.makeText(context, "Unable to acquire GPS location.", android.widget.Toast.LENGTH_LONG).show()
-            onStatusChange("SOS failed: GPS unavailable")
+            tryLastLocation("getCurrentLocation returned null")
         }
     }.addOnFailureListener { e ->
-        Log.e("SOS_API", "GPS retrieval failed", e)
-        android.widget.Toast.makeText(context, "GPS error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-        onStatusChange("SOS failed: GPS error")
+        Log.w("SOS_API", "getCurrentLocation failed, trying lastLocation", e)
+        tryLastLocation("getCurrentLocation error: ${e.message}")
     }
 }
